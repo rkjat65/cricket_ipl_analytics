@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(del \"c:\\\\cricproject\\\\cricket_project\\\\dashboard\\\\custom_style.css\")"
+    ]
+  }
+}

@@ -42,3 +42,10 @@ pytest==7.4.3
 # Code Quality (optional)
 black==23.12.1
 flake8==6.1.0
+
+streamlit>=1.28.0
+pandas>=2.0.0
+plotly>=5.18.0
+python-dotenv>=1.0.0
+google-generativeai>=0.3.0
+Pillow>=10.0.0
