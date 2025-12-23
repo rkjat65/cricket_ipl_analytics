@@ -55,6 +55,19 @@ TEAM_COLORS = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# --- HIDE STREAMLIT STYLE ---
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
+# ... rest of your app code ...
+
 def format_columns(df):
     """Format column names to proper case."""
     if df is None:
@@ -3184,22 +3197,50 @@ def show_player_records():
 # ==================== AI DASHBOARD (REDESIGNED) ====================
 
 def show_ai_dashboard():
-    """Enhanced AI Dashboard with improved UX and better query handling"""
+    """Enhanced AI Dashboard with independent but linked buttons and proper state management"""
     theme = get_chart_theme_colors()
     
     st.markdown(f"""
         <div style="text-align: center; margin-bottom: 2rem;">
-            <h1 style="margin-bottom: 0.5rem; color: {theme['title_color']};">🤖 AI-Powered Analytics Dashboard</h1>
+            <h1 style="margin-bottom: 0.5rem; color: {theme['title_color']};"> AI-Powered Analytics Dashboard</h1>
             <p style="font-size: 1.2rem; color: {theme['text_color']}; opacity: 0.8;">Ask questions in natural language and get intelligent insights</p>
         </div>
     """, unsafe_allow_html=True)
     
     if not GEMINI_AVAILABLE or not GEMINI_API_KEY:
-        st.warning("⚠️ Gemini API not configured. Please set GEMINI_API_KEY in your .env file to use AI features.")
-        st.info("💡 This is a unique feature that allows you to ask questions about IPL data in natural language!")
+        st.warning("⚠️ Gemini API not configured. Please set GEMINI_API_KEY in your .env file.")
         return
     
-    # Example questions with better UX
+    # --- INTERNAL HELPER: Data Fetching Logic ---
+    def fetch_and_process_data(user_question):
+        """Fetches data and updates session state. Returns (Success_Bool, Data_Frame or Error_Msg)"""
+        try:
+            # Generate SQL (Assuming generate_sql_from_question uses the appropriate model internally)
+            # If you need to enforce gemini-3-pro-preview for SQL, update that function separately
+            sql = generate_sql_from_question(user_question)
+            
+            if not sql:
+                return False, "Could not translate question to SQL."
+
+            # Get data
+            conn = get_database_connection()
+            # Assuming safe_query_execution returns a dataframe
+            df = safe_query_execution(sql, conn, "Unable to fetch data")
+            
+            if df is None or df.empty:
+                return False, "No data found for this query."
+                
+            # Update Session State
+            st.session_state.last_query_data = df
+            st.session_state.last_query_question = user_question
+            return True, df
+            
+        except Exception as e:
+            return False, str(e)
+
+    # --- UI LAYOUT ---
+
+    # Example questions
     st.markdown("### 💡 Try These Questions")
     example_cols = st.columns(3)
     examples = [
@@ -3207,11 +3248,10 @@ def show_ai_dashboard():
         "Compare Mumbai Indians vs Chennai Super Kings",
         "Which team has the best win percentage?",
         "Show me the top 10 wicket takers",
-        "How many matches were played in 2024?",
-        "What is the head to head record between RCB and CSK?"
+        "How many matches were played in 2019?",
+        "Head to head record RCB vs CSK"
     ]
     
-    # Initialize session state
     if 'ai_query' not in st.session_state:
         st.session_state.ai_query = ''
     
@@ -3219,221 +3259,180 @@ def show_ai_dashboard():
         with example_cols[idx % 3]:
             if st.button(ex, key=f"ai_example_{idx}", use_container_width=True):
                 st.session_state.ai_query = ex
-                st.rerun()  # Rerun will update the text_area value
+                st.rerun()
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Question input - value comes from session state (updates after rerun)
+    # Question Input
     st.markdown("### ❓ Ask Your Question")
     question = st.text_area(
         "Enter your question about IPL data:",
         value=st.session_state.get('ai_query', ''),
-        placeholder="Example: Who are the top 5 batsmen in IPL history?",
+        placeholder="Example: Top 5 batsman in the 2019 IPL run wise",
         height=120,
-        key="ai_question_input",
-        help="Ask any question about teams, players, matches, or statistics"
+        key="ai_question_input"
     )
     
-    # Sync session state with current input
+    # Sync input to state
     if question:
         st.session_state.ai_query = question
     
-    # Action buttons
+    # Action Buttons
     col1, col2 = st.columns([1, 1])
-    
     with col1:
-        get_answer_btn = st.button("🔍 Get Answer", type="primary", key="get_answer_btn", use_container_width=True)
-    
+        get_answer_btn = st.button("🔍 Get Answer", type="primary", use_container_width=True)
     with col2:
-        generate_image_btn = st.button("🎨 Generate Visualization", type="secondary", key="gen_image_btn", use_container_width=True)
-    
-    # BUTTON 1: Get Answer (Chat-style response)
+        generate_image_btn = st.button("🎨 Generate Visualization", type="secondary", use_container_width=True)
+
+    # --- LOGIC HANDLERS ---
+
+    # HANDLER 1: Get Answer (Text + Data)
     if get_answer_btn and question:
-        with st.spinner("🤔 Analyzing your question..."):
-            try:
-                # Generate SQL
-                sql = generate_sql_from_question(question)
+        with st.status("🤔 Analyzing your question...", expanded=True) as status:
+            
+            # Step 1: Fetch Data
+            status.write("🔍 Converting question to SQL and fetching data...")
+            success, result = fetch_and_process_data(question)
+            
+            if success:
+                data = result
+                status.write("✅ Data fetched successfully!")
                 
-                if sql:
-                    # Get data
-                    conn = get_database_connection()
-                    data = safe_query_execution(sql, conn, "Unable to fetch data for your question")
-                    
-                    if not data.empty and len(data) > 0:
-                        # Show data table first
-                        st.markdown("### 📊 Data Results")
-                        formatted_data = format_columns(data.head(20))
-                        st.dataframe(formatted_data, width='stretch', hide_index=True, height=300)
-                        add_export_buttons(formatted_data, key_prefix="ai_query_data")
-                        
-                        # Generate chat-style answer
-                        try:
-                            model = genai.GenerativeModel('gemini-3-pro-preview')
-                            
-                            data_summary = data.head(10).to_string(index=False)
-                            
-                            prompt = f"""You are an IPL cricket analyst. Answer this question in a friendly, conversational way.
-
-Question: {question}
-
-Data:
-{data_summary}
-
-Instructions:
-- Give a natural, conversational answer
-- Start directly with the answer
-- Include specific numbers and names from the data
-- Make it engaging and easy to understand
-- Keep it concise (2-4 sentences)
-- Do not mention SQL or technical details
-- If it's a comparison, highlight key differences"""
-                            
-                            response = model.generate_content(prompt)
-                            answer = response.text.strip()
-                            
-                            # Display answer with better styling
-                            st.markdown("### 💡 AI Insight")
-                            st.markdown(f"""
-                                <div style="background: linear-gradient(135deg, {theme['accent_primary']} 0%, {theme['accent_secondary']} 100%); 
-                                           padding: 1.5rem; border-radius: 12px; color: white; margin: 1rem 0; 
-                                           box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                                    <div style="font-size: 1.1rem; line-height: 1.8;">{answer}</div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                            
-                            # Store for image generation
-                            st.session_state.last_query_data = data
-                            st.session_state.last_query_question = question
-                            
-                        except Exception as e:
-                            logger.error(f"Error generating AI answer: {e}")
-                            st.warning("⚠️ Could not generate AI insight, but data is shown above.")
-                    else:
-                        st.warning("⚠️ No data found for your question. Try rephrasing or asking about different teams/players.")
-                        st.info("💡 Try: 'Who are the top 5 run scorers?' or 'Compare Mumbai Indians vs Chennai Super Kings'")
-                else:
-                    st.error("❌ Could not understand the question. Please try rephrasing.")
-                    st.info("💡 Make sure your question mentions teams, players, or statistics clearly.")
-                    
-            except Exception as e:
-                error_msg = str(e)[:200]
-                st.error(f"❌ Error: {error_msg}")
-                logger.error(f"AI dashboard error: {e}\n{traceback.format_exc()}")
-                st.info("💡 Try refreshing the page or rephrasing your question.")
-    
-    # BUTTON 2: Generate Image
-    if generate_image_btn and question:
-        if 'last_query_data' not in st.session_state or st.session_state.get('last_query_data') is None:
-            st.warning("⚠️ Please click 'Get Answer' first to fetch the data!")
-            st.info("💡 The AI needs to analyze your question and fetch data before generating a visualization.")
-        else:
-            with st.spinner("🎨 Generating AI visualization... (This may take 15-30 seconds)"):
+                # Show Data Table
+                st.markdown("### 📊 Data Results")
+                formatted_data = format_columns(data.head(20))
+                st.dataframe(formatted_data, width='stretch', hide_index=True, height=300)
+                
+                # Step 2: Generate AI Text Insight
+                status.write("🤖 Generating AI insight...")
                 try:
-                    data = st.session_state.last_query_data
-                    data_ctx = prepare_data_context(data, max_rows=15)
+                    # Specific model for text analysis
+                    model_text = genai.GenerativeModel('gemini-3-pro-preview') 
                     
-                    ai_prompt = f"""Generate a professional IPL cricket data visualization.
-Question: {question}
-Data: {data_ctx}
-Create high resolution 1920x1080 image, clear labels, professional typography, and modern clean design, use players caricatures and/or team logos."""
+                    data_summary = data.head(10).to_string(index=False)
+                    prompt = f"""You are an IPL analyst. Answer concisely based on this data:
+                    Question: {question}
+                    Data: {data_summary}
+                    Keep it conversational, mention specific numbers."""
                     
-                    model = genai.GenerativeModel('gemini-3-pro-image-preview')
-                    response = model.generate_content(
+                    response = model_text.generate_content(prompt)
+                    answer = response.text.strip()
+                    
+                    st.markdown("### 💡 AI Insight")
+                    st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, {theme['accent_primary']} 0%, {theme['accent_secondary']} 100%); 
+                                   padding: 1.5rem; border-radius: 12px; color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                            <div style="font-size: 1.1rem; line-height: 1.8;">{answer}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+                    status.update(label="Analysis Complete!", state="complete", expanded=True)
+                    
+                except Exception as e:
+                    status.update(label="Analysis Failed", state="error")
+                    st.error(f"AI Text Error: {str(e)}")
+            else:
+                status.update(label="Data Fetch Failed", state="error")
+                st.error(f"❌ {result}")
+
+    # HANDLER 2: Generate Image (Visual Only)
+    if generate_image_btn and question:
+        with st.status("🎨 Preparing Visualization...", expanded=True) as status:
+            
+            # Step 1: Check if we have VALID data for THIS question
+            # If data is missing OR the question in box is different from the last cached question -> Fetch new
+            current_data = st.session_state.get('last_query_data')
+            last_q = st.session_state.get('last_query_question')
+            
+            data_ready = False
+            
+            if current_data is None or last_q != question:
+                status.write("🔄 Fetching fresh data for visualization...")
+                success, result = fetch_and_process_data(question)
+                if success:
+                    current_data = result
+                    data_ready = True
+                    status.write("✅ Data fetched!")
+                else:
+                    status.update(label="Data Fetch Failed", state="error")
+                    st.error(f"❌ {result}")
+            else:
+                status.write("⚡ Using cached data...")
+                data_ready = True
+
+            # Step 2: Generate Image
+            if data_ready:
+                status.write("🖌️ AI is drawing the chart (Gemini 3 Pro Image)...")
+                try:
+                    data_ctx = prepare_data_context(current_data, max_rows=15)
+                    
+                    ai_prompt = f"""Generate a professional IPL cricket infographic.
+                    Question: {question}
+                    Data Summary: {data_ctx}
+                    Style: High resolution 1920x1080, dark modern theme, neon accents. 
+                    Include clear data labels, team logos or cricket elements. 
+                    Make it look like a broadcast graphic."""
+                    
+                    # Specific model for Image Generation
+                    model_image = genai.GenerativeModel('gemini-3-pro-image-preview')
+                    
+                    response = model_image.generate_content(
                         ai_prompt,
-                        generation_config=genai.GenerationConfig(temperature=0.4, max_output_tokens=8192),
+                        generation_config=genai.GenerationConfig(temperature=0.4),
                         request_options={'timeout': 60}
                     )
                     
                     if response and hasattr(response, 'parts'):
+                        # Extract Image
                         for part in response.parts:
                             if hasattr(part, 'inline_data') and part.inline_data:
                                 ai_img = part.inline_data.data
+                                # Assuming add_watermark_to_image exists
                                 watermarked = add_watermark_to_image(ai_img, "@rkjat65")
-                                saved = save_image_to_folder(watermarked, "ai_query")
                                 
-                                st.success(f"Visualization generated!")
-                                st.image(watermarked, width='stretch')
-                                st.download_button("Download Visualization", watermarked, "ai_visualization.png", "image/png", width='content', key="dl_ai_viz")
+                                st.image(watermarked, width="stretch", caption=f"Visual: {question}")
+                                st.download_button(
+                                    "Download Image", 
+                                    watermarked, 
+                                    "ipl_viz.png", 
+                                    "image/png"
+                                )
+                                status.update(label="Visualization Generated!", state="complete", expanded=True)
                                 break
                         else:
-                            st.error("No image generated. Try again.")
+                             status.update(label="Generation Failed", state="error")
+                             st.error("Model returned no image data.")
                     else:
-                        st.error("Generation failed. Try again.")
+                        status.update(label="Generation Failed", state="error")
+                        st.error("No response from Image API.")
                         
                 except Exception as e:
-                    if "429" in str(e) or "quota" in str(e).lower():
-                        st.error("API quota exceeded!")
-                        st.info("Solutions: 1) Wait 5-10 minutes 2) Check quota at https://aistudio.google.com/app/apikey")
-                    else:
-                        st.error(f"Error: {str(e)[:100]}")
+                    status.update(label="Generation Error", state="error")
+                    st.error(f"Image Gen Error: {str(e)}")
 
-    # SECTION 2: Four Portfolio Images
-    st.markdown("## AI Powered Viz")
-    st.markdown("*Powered by Google Gemini Nano 🍌 Pro*")
-    # st.info("Portfolio Showcase: These professional visualizations were generated entirely by AI from IPL match data")
-    
-    # 2x2 Grid of Images
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("### IPL Teams Stats")
-        try:
-            st.image("generated_images/champ.png", 
-                    caption="Team Kundali", width='stretch')
-        except:
-            st.markdown("""
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); height: 300px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.2rem; text-align: center; padding: 2rem;">
-                    <div>
-                        <h3 style="color: white; margin: 0;">Team Performance</h3>
-                        <p style="margin-top: 1rem; opacity: 0.9;">Add image: showcase_team_comparison.png</p>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-        
-        st.markdown("### Kings & Indians Comparison")
-        try:
-            st.image("generated_images/micsk.png",
-                    caption="MI vs CSK", width='stretch')
-        except:
-            st.markdown("""
-                <div style="background: linear-gradient(135deg, #764ba2 0%, #667eea 100%); height: 300px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.2rem; text-align: center; padding: 2rem;">
-                    <div>
-                        <h3 style="color: white; margin: 0;">Player Stats</h3>
-                        <p style="margin-top: 1rem; opacity: 0.9;">Add image: showcase_player_radar.png</p>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("### Top 5 Batsmens")
-        try:
-            st.image("generated_images/top5batsmen.png",
-                    caption="Run Machine", width='stretch')
-        except:
-            st.markdown("""
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); height: 300px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.2rem; text-align: center; padding: 2rem;">
-                    <div>
-                        <h3 style="color: white; margin: 0;">Season Trends</h3>
-                        <p style="margin-top: 1rem; opacity: 0.9;">Add image: showcase_season_trends.png</p>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-        
-        st.markdown("### Top 5 Bowlers")
-        try:
-            st.image("generated_images/top5b.png",
-                    caption="Pitch Perfect", width='stretch')
-        except:
-            st.markdown("""
-                <div style="background: linear-gradient(135deg, #764ba2 0%, #667eea 100%); height: 300px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.2rem; text-align: center; padding: 2rem;">
-                    <div>
-                        <h3 style="color: white; margin: 0;">Venue Stats</h3>
-                        <p style="margin-top: 1rem; opacity: 0.9;">Add image: showcase_venue_heatmap.png</p>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-    
+    # SECTION 2: Portfolio Images (Keeping your existing code for static images)
     st.markdown("---")
+    st.markdown("## 🖼️ AI Viz Showcase")
+    
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        st.markdown("### 🏆 Championship Analysis")
+        # Use st.image with file path check or fallback
+        try: st.image("generated_images/champ.png", width="stretch")
+        except: st.info("Placeholder: Championship Stats")
+        
+        st.markdown("### ⚔️ MI vs CSK")
+        try: st.image("generated_images/micsk.png", width="stretch")
+        except: st.info("Placeholder: MI vs CSK")
+
+    with col_p2:
+        st.markdown("### 🏏 Top Batsmen")
+        try: st.image("generated_images/top5batsmen.png", width="stretch")
+        except: st.info("Placeholder: Top Batsmen")
+        
+        st.markdown("### 🎯 Top Bowlers")
+        try: st.image("generated_images/top5b.png", width="stretch")
+        except: st.info("Placeholder: Top Bowlers")
                     
 def show_generated_gallery():
     """Show history of generated images"""
@@ -3474,275 +3473,7 @@ def show_generated_gallery():
 
     
 
-# ==================== OLD AI ASSISTANT (KEEP FOR REFERENCE) ====================
-    """AI Assistant with enhanced image generation"""
-    st.title("🤖 IPL AI Assistant")
-    st.markdown("### Ask questions in natural language")
-    
-    if not GEMINI_AVAILABLE:
-        st.error("❌ Install: `pip install google-generativeai python-dotenv`")
-        return
-    
-    if not GEMINI_API_KEY:
-        st.error("❌ Add GEMINI_API_KEY to .env file")
-        return
-    
-    if not initialize_gemini():
-        st.error("❌ Failed to initialize")
-        return
-    
-    st.success("✅ AI Ready!")
-    
-    tab1, tab2 = st.tabs(["💬 Ask Questions", "🎨 Generate Images"])
-    
-    # TAB 1: Questions
-    with tab1:
-        st.markdown("### 💬 Chat with AI")
-        
-        with st.expander("💡 Examples"):
-            st.markdown("""
-            - Which team won the most matches?
-            - Show Mumbai Indians' win rate
-            - Compare CSK and MI
-            """)
-        
-        if st.button("🗑️ Clear", key="clear"):
-            st.session_state.messages = []
-            st.rerun()
-        
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                if "data" in msg and msg["data"] is not None:
-                    formatted_data = format_columns(msg["data"])  # Format column names
-                    st.dataframe(formatted_data, width='stretch', hide_index=True)
-                if "sql" in msg:
-                    with st.expander("🔍 SQL"):
-                        st.code(msg["sql"], language="sql")
-        
-        if prompt := st.chat_input("Ask about IPL..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            
-            with st.chat_message("assistant"):
-                with st.spinner("🤔 Thinking..."):
-                    sql = generate_sql_from_question(prompt)
-                    
-                    # Store SQL but don't show to user (kept for debugging if needed)
-                    # with st.expander("🔍 SQL"):
-                    #     st.code(sql, language="sql")
-                    
-                    try:
-                        conn = get_database_connection()
-                        data = pd.read_sql_query(sql, conn)
-                        
-                        if len(data) > 0:
-                            formatted_data = format_columns(data)  # Format column names
-                            st.dataframe(formatted_data, width='stretch', hide_index=True)
-                            insight = generate_insight_from_data(prompt, data)
-                            st.info(f"💡 {insight}")
-                            st.session_state.messages.append({
-                                "role": "assistant", "content": insight,
-                                "data": data, "sql": sql
-                            })
-                        else:
-                            msg = "No results. Try rephrasing."
-                            st.warning(msg)
-                            st.session_state.messages.append({
-                                "role": "assistant", "content": msg, "sql": sql
-                            })
-                    except Exception as e:
-                        error = f"❌ Error: {e}"
-                        st.error(error)
-                        st.session_state.messages.append({
-                            "role": "assistant", "content": error, "sql": sql
-                        })
-    
-    # TAB 2: Image Generation (keeping same as original - no changes needed)
-    with tab2:
-        st.markdown("### 🎨 AI Image Generation")
-        st.info("📊 **Workflow:** Load Data → Plotly Chart → AI Version → Compare!")
-        
-        if 'workflow_step' not in st.session_state:
-            st.session_state.workflow_step = 1
-        
-        col1, col2, col3 = st.columns([2, 1, 2])
-        with col2:
-            if st.button("🔄 Reset", type="secondary"):
-                for key in ['workflow_step', 'plotly_fig', 'plotly_image', 'ai_image', 'data']:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.rerun()
-        
-        st.markdown("---")
-        st.markdown("#### 📊 Step 1: Select Data")
-        
-        data_mode = st.radio("Choose:", ["Quick Select", "Custom Query"], horizontal=True)
-        
-        if data_mode == "Quick Select":
-            opts = load_database_data_options()
-            sel = st.selectbox("Select Data", list(opts.keys()))
-            
-            if sel:
-                st.info(f"📝 {opts[sel]['description']}")
-                
-                if st.button("📊 Load Data", key="load_q", type="primary"):
-                    try:
-                        with st.spinner("Loading..."):
-                            conn = get_database_connection()
-                            data = pd.read_sql_query(opts[sel]['query'], conn)
-                            st.session_state['data'] = data
-                            st.session_state['data_name'] = sel
-                            st.session_state.workflow_step = 2
-                            st.success(f"✅ Loaded {len(data)} rows!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-        else:
-            query = st.text_input("Describe data:", placeholder="Example: Show top 5 teams by wins")
-            
-            if st.button("🔍 Get Data", key="load_c", type="primary") and query:
-                with st.spinner("Generating..."):
-                    try:
-                        sql = generate_sql_from_question(query)
-                        st.code(sql, language="sql")
-                        
-                        conn = get_database_connection()
-                        data = pd.read_sql_query(sql, conn)
-                        
-                        st.session_state['data'] = data
-                        st.session_state['data_name'] = "Custom"
-                        st.session_state.workflow_step = 2
-                        st.success(f"✅ Got {len(data)} rows!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-        
-        if 'data' in st.session_state and st.session_state.workflow_step >= 2:
-            st.markdown("---")
-            st.markdown("#### ✅ Data Loaded")
-            formatted_data = format_columns(st.session_state['data'])  # Format column names
-            st.dataframe(formatted_data, width='stretch', hide_index=True)
-            
-            st.markdown("---")
-            st.markdown("#### 📈 Step 2: Generate Plotly Chart")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                opts = get_chart_type_options(st.session_state['data'])
-                chart_type = st.selectbox("Chart Type", [o[0] for o in opts],
-                                         format_func=lambda x: next(o[1] for o in opts if o[0] == x))
-            with col2:
-                title = st.text_input("Title", value=f"IPL - {st.session_state.get('data_name', 'Data')}")
-            
-            if st.button("📊 Generate Plotly", type="primary"):
-                with st.spinner("Creating..."):
-                    try:
-                        fig = generate_plotly_chart(st.session_state['data'], chart_type, title)
-                        if fig:
-                            st.session_state.plotly_fig = fig
-                            st.session_state.chart_title = title
-                            st.session_state.plotly_image = plotly_to_image_bytes(fig)
-                            st.session_state.workflow_step = 3
-                            st.success("✅ Chart generated!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-        
-        if st.session_state.workflow_step >= 3 and 'plotly_fig' in st.session_state:
-            st.markdown("---")
-            st.markdown("#### 📊 Your Plotly Chart")
-            st.plotly_chart(st.session_state.plotly_fig, key="plotly_preview")
-            
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                if 'plotly_image' in st.session_state and st.session_state.plotly_image is not None:
-                    st.download_button("📥 Download Plotly",
-                                      st.session_state.plotly_image,
-                                      "plotly.png", "image/png", key="dl_plotly_preview")
-                else:
-                    st.caption("💡 Chart displayed above (download available after AI generation)")
-            
-            st.markdown("---")
-            st.markdown("#### 🤖 Step 3: Generate AI Version")
-            st.info("💡 Data auto-included. Describe visual style!")
-            
-            prompt = st.text_area("Describe chart:",
-                                 placeholder="Example: Modern bar chart with team logos and gradients",
-                                 height=100)
-            
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                if st.button("🎨 Generate AI", type="primary"):
-                    if not prompt:
-                        st.warning("⚠️ Please describe your chart!")
-                    else:
-                        with st.spinner("🎨 Generating... (10-20 sec)"):
-                            try:
-                                data_ctx = prepare_data_context(st.session_state['data'])
-                                chart_info = get_chart_info(st.session_state.plotly_fig)
-                                
-                                full_prompt = f"""Generate professional IPL visualization.
 
-{prompt}
-
-Chart: {chart_info}
-Data: {data_ctx}
-
-Requirements: High-res (1920x1080), clear labels, accurate data.
-Title: "{st.session_state.get('chart_title', 'IPL')}"
-"""
-                                
-                                model = genai.GenerativeModel('gemini-3-pro-image-preview')
-                                response = model.generate_content(full_prompt)
-                                
-                                if response and hasattr(response, 'parts'):
-                                    for part in response.parts:
-                                        if hasattr(part, 'inline_data') and part.inline_data:
-                                            ai_img = part.inline_data.data
-                                            watermarked = add_watermark_to_image(ai_img, "@rkjat65")
-                                            saved = save_image_to_folder(watermarked)
-                                            
-                                            st.session_state.ai_image = watermarked
-                                            st.session_state.workflow_step = 4
-                                            st.success(f"✅ Generated! Saved: {saved}")
-                                            st.rerun()
-                                            break
-                                    else:
-                                        st.error("No image in response")
-                                else:
-                                    st.error("Generation failed")
-                            except Exception as e:
-                                st.error(f"❌ {e}")
-        
-        if st.session_state.workflow_step >= 4 and 'ai_image' in st.session_state:
-            st.markdown("---")
-            st.markdown("#### 🔥 Comparison")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("##### 📊 Plotly")
-                st.plotly_chart(st.session_state.plotly_fig, key="plotly_comparison")
-                
-                if 'plotly_image' not in st.session_state or st.session_state.plotly_image is None:
-                    with st.spinner("Converting chart..."):
-                        st.session_state.plotly_image = plotly_to_image_bytes(st.session_state.plotly_fig)
-                
-                if st.session_state.get('plotly_image') is not None:
-                    st.download_button("📥 Download Plotly",
-                                      st.session_state.plotly_image,
-                                      "plotly.png", "image/png", key="dl_p")
-                else:
-                    st.caption("💡 Chart visible above. Install kaleido for downloads: `pip install kaleido`")
-            
-            with col2:
-                st.markdown("##### 🤖 AI Generated")
-                st.image(st.session_state.ai_image, width='stretch')
-                st.download_button("📥 Download AI (with @rkjat65)",
-                                  st.session_state.ai_image,
-                                  "ai_generated.png", "image/png", key="dl_a")
 
 if __name__ == "__main__":
     main()
